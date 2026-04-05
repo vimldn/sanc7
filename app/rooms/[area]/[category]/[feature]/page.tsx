@@ -1,0 +1,161 @@
+import { Metadata } from 'next'
+import { notFound } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+import { buildJsonLd } from '@/lib/sanctuary/schema'
+import { RoomCard } from '@/components/RoomCard'
+import { SanctuaryPricingPanel } from '@/components/SanctuaryPricingPanel'
+import { FAQAccordion } from '@/components/FAQAccordion'
+import { TransparencyBanner } from '@/components/TransparencyBanner'
+import type { AvailableRoom, PageTarget, RoomCategory } from '@/lib/supabase/types'
+
+interface PageParams {
+  area: string
+  category: RoomCategory
+  feature: string
+}
+
+function toTitleCase(slug: string) {
+  return slug.split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')
+}
+
+// Typed wrapper — avoids fighting Supabase generic inference
+async function fetchPageTarget(slug: string): Promise<PageTarget | null> {
+  const supabase = await createClient()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (supabase as any).from('page_targets').select('*').eq('slug', slug).single()
+  return (result.data ?? null) as PageTarget | null
+}
+
+async function fetchPageTargets(): Promise<PageTarget[]> {
+  const supabase = await createClient()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (supabase as any).from('page_targets').select('*')
+  return ((result.data ?? []) as PageTarget[])
+}
+
+async function fetchAvailableRooms(area: string, category: string): Promise<AvailableRoom[]> {
+  const supabase = await createClient()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (supabase as any)
+    .from('v_available_rooms')
+    .select('*')
+    .eq('area', area)
+    .eq('category', category)
+    .order('saving_pct', { ascending: false })
+    .limit(12)
+  return ((result.data ?? []) as AvailableRoom[])
+}
+
+export async function generateStaticParams() {
+  const targets = await fetchPageTargets()
+  return targets.map((row) => ({
+    area:     row.area.toLowerCase().replace(/\s+/g, '-'),
+    category: row.category,
+    feature:  row.primary_feature,
+  }))
+}
+
+export async function generateMetadata(
+  { params }: { params: Promise<PageParams> }
+): Promise<Metadata> {
+  const { area, category, feature } = await params
+  const areaLabel = toTitleCase(area)
+  const target = await fetchPageTarget(`${feature}-${area}`)
+  if (!target) return { title: 'The London Sanctuary' }
+  const h1 = target.h1_template.replace('{area}', areaLabel)
+  return {
+    title: h1,
+    description: target.meta_desc,
+    openGraph: { title: h1, description: target.meta_desc },
+    alternates: { canonical: `/rooms/${area}/${category}/${feature}` },
+  }
+}
+
+export default async function SanctuaryLandingPage(
+  { params }: { params: Promise<PageParams> }
+) {
+  const { area, category, feature } = await params
+  const areaLabel = toTitleCase(area)
+
+  const target = await fetchPageTarget(`${feature}-${area}`)
+  if (!target) notFound()
+
+  const rooms = await fetchAvailableRooms(areaLabel, category)
+  const h1 = target.h1_template.replace('{area}', areaLabel)
+  const jsonLd = buildJsonLd(target, rooms)
+
+  const categoryLabel: Record<RoomCategory, string> = {
+    performance: 'Deep-Work · Performance',
+    wellness:    'Micro-Wellness · Recovery',
+    basecamp:    'Basecamp · Event Refresh',
+  }
+
+  return (
+    <>
+      {jsonLd.map((schema, i) => (
+        <script
+          key={i}
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(schema) }}
+        />
+      ))}
+
+      <main className="max-w-5xl mx-auto px-4 py-12">
+
+        <nav className="text-xs text-stone-400 mb-8 flex items-center gap-2">
+          <a href="/" className="hover:text-stone-600 transition-colors">Home</a>
+          <span>›</span>
+          <a href="/rooms" className="hover:text-stone-600 transition-colors">Rooms</a>
+          <span>›</span>
+          <span>{areaLabel}</span>
+          <span>›</span>
+          <span className="capitalize">{category}</span>
+        </nav>
+
+        <header className="mb-10">
+          <p className="text-xs font-medium tracking-[0.15em] uppercase text-gold mb-3">
+            {categoryLabel[category]} · {areaLabel}
+          </p>
+          <h1 className="font-display text-4xl md:text-5xl font-semibold text-stone-900 leading-tight mb-4">
+            {h1}
+          </h1>
+          <p className="text-lg text-stone-500 max-w-2xl leading-relaxed">
+            {target.meta_desc}
+          </p>
+        </header>
+
+        <TransparencyBanner />
+
+        {rooms.length > 0 ? (
+          <section className="mb-12">
+            <h2 className="font-display text-2xl font-semibold text-stone-900 mb-5">Available rooms</h2>
+            <div className="grid md:grid-cols-2 gap-5">
+              {rooms.map((room) => (
+                <RoomCard key={room.id} room={room} category={category} />
+              ))}
+            </div>
+          </section>
+        ) : (
+          <div className="border border-stone-200 rounded-xl p-12 text-center mb-12 bg-white">
+            <p className="text-stone-500">No rooms available for today — availability updates nightly.</p>
+          </div>
+        )}
+
+        <SanctuaryPricingPanel
+          area={areaLabel}
+          category={category}
+          aggregatorRate={rooms[0]?.aggregator_rate_gbp ?? null}
+          sanctuaryRate={rooms[0]?.sanctuary_rate_gbp ?? null}
+        />
+
+        {target.faq_json && target.faq_json.length > 0 && (
+          <section className="mt-12">
+            <h2 className="font-display text-2xl font-semibold text-stone-900 mb-6">Common questions</h2>
+            <FAQAccordion items={target.faq_json} />
+          </section>
+        )}
+
+      </main>
+    </>
+  )
+}
